@@ -1,6 +1,6 @@
 # Work around for terraform provider issue asking for an aws region
 provider "aws" {
-  region  = "us-east-1"
+  region = "us-east-1"
 }
 
 provider "aws" {

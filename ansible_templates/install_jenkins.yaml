@@ -29,6 +29,15 @@
         state: present
         key: https://pkg.jenkins.io/redhat/jenkins.io.key
  
+    - name: install epel
+      shell: amazon-linux-extras install epel -y
+      become: yes
+
+    - name: Update yum
+      yum:
+        name: '*'
+        state: latest
+ 
     - name: install Jenkins
       yum:
         name: jenkins

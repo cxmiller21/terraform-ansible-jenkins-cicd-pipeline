@@ -9,7 +9,7 @@ data "aws_ami" "amazon-linux" {
 }
 
 data "aws_ami" "amazon-linux-worker" {
-  provider = aws.region-worker
+  provider    = aws.region-worker
   most_recent = true
   owners      = ["amazon"]
 
