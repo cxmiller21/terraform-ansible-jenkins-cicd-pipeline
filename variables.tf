@@ -15,3 +15,9 @@ variable "project-name" {
   type    = string
   default = "cm-tf-ansible-jenkins-cicd"
 }
+
+# Jenkins workers count
+variable "workers_count" {
+  type    = number
+  default = 1
+}

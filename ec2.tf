@@ -8,116 +8,82 @@ data "aws_ami" "amazon-linux" {
   }
 }
 
-resource "aws_key_pair" "ssh_key" {
-  key_name   = "cm-ec2-key"
-  public_key = var.public_key
+data "aws_ami" "amazon-linux-worker" {
+  provider = aws.region-worker
+  most_recent = true
+  owners      = ["amazon"]
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm*"]
+  }
 }
 
-data "http" "myip" {
-  url = "http://ipv4.icanhazip.com"
+# key-pair for logging into EC2 in us-east-1
+resource "aws_key_pair" "main_key" {
+  provider   = aws.region-main
+  key_name   = "jenkins"
+  public_key = file("~/.ssh/id_rsa.pub")
 }
 
-resource "aws_security_group" "ec2_sg" {
-  name   = "EC2-SG"
-  vpc_id = aws_vpc.main.id
-
-  ingress = [
-    {
-      cidr_blocks      = ["${chomp(data.http.myip.body)}/32"]
-      description      = "Allow inboud SSH from local IP"
-      from_port        = 22
-      ipv6_cidr_blocks = []
-      prefix_list_ids  = []
-      protocol         = "tcp"
-      security_groups  = []
-      self             = false
-      to_port          = 22
-      tags = {
-        Name = "Allow inbound SSH from local IP"
-      }
-    }
-    // {
-    //   cidr_blocks      = ["0.0.0.0/0"]
-    //   description      = "Allow TLS connections"
-    //   from_port        = 443
-    //   ipv6_cidr_blocks = []
-    //   prefix_list_ids  = []
-    //   protocol         = "tcp"
-    //   security_groups  = []
-    //   self             = false
-    //   to_port          = 443
-    //   tags = {
-    //     Name = "Allow inbound TLS"
-    //   }
-  ]
-
-  egress = [{
-    cidr_blocks      = ["0.0.0.0/0"]
-    description      = "Egress"
-    from_port        = 0
-    ipv6_cidr_blocks = []
-    prefix_list_ids  = []
-    protocol         = -1
-    self             = false
-    security_groups  = []
-    to_port          = 0
-  }]
-
+# key-pair for logging into EC2 in us-west-2
+resource "aws_key_pair" "worker_key" {
+  provider   = aws.region-worker
+  key_name   = "jenkins"
+  public_key = file("~/.ssh/id_rsa.pub")
 }
 
-resource "aws_iam_instance_profile" "main" {
-  name = "EC2_SSH-Profile"
-  role = aws_iam_role.main.name
-}
-
-resource "aws_iam_role" "main" {
-  name = "cm-ec2-ssh-role"
-  path = "/"
-
-  assume_role_policy = <<EOF
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Action": "sts:AssumeRole",
-            "Principal": {
-               "Service": "ec2.amazonaws.com"
-            },
-            "Effect": "Allow",
-            "Sid": ""
-        }
-    ]
-}
-EOF
-}
-
-resource "aws_instance" "nginx" {
+resource "aws_instance" "jenkins_main" {
+  provider                    = aws.region-main
   ami                         = data.aws_ami.amazon-linux.id
-  iam_instance_profile        = aws_iam_instance_profile.main.name
-  associate_public_ip_address = true
-  key_name                    = aws_key_pair.ssh_key.key_name
   instance_type               = "t3.micro"
-  subnet_id                   = aws_subnet.public.id
-  security_groups             = [aws_security_group.ec2_sg.id]
-
-  //   provisioner "remote-exec" {
-  //     inline = [
-  //         "",
-  //     ]
-  //   }
-
-  connection {
-    type  = "ssh"
-    host  = self.public_ip
-    user  = "ec2-user"
-    agent = true
+  key_name                    = aws_key_pair.main_key.key_name
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.jenkins_main.id]
+  subnet_id                   = aws_subnet.public_1.id
+  provisioner "local-exec" {
+    command = <<EOF
+aws --profile ${var.profile} ec2 wait instance-status-ok --region ${var.region-main} --instance-ids ${self.id} \
+&& ansible-playbook --extra-vars 'passed_in_hosts=tag_Name_${self.tags.Name}' ansible_templates/install_jenkins.yaml
+EOF
   }
-
   tags = {
-    Name = "cm-ec2-ssh-instance"
+    Name = "jenkins_main_tf"
   }
+  depends_on = [aws_main_route_table_association.main_default_rt_assoc]
 }
 
-output "ec2_public_ip" {
-  value = aws_instance.nginx.public_ip
+resource "aws_instance" "jenkins_worker" {
+  provider                    = aws.region-worker
+  count                       = var.workers_count
+  ami                         = data.aws_ami.amazon-linux-worker.id
+  instance_type               = "t3.micro"
+  key_name                    = aws_key_pair.worker_key.key_name
+  associate_public_ip_address = true
+  vpc_security_group_ids      = [aws_security_group.jenkins_worker.id]
+  subnet_id                   = aws_subnet.public_worker_1.id
+  provisioner "remote-exec" {
+    when = destroy
+    inline = [
+      "java -jar /home/ec2-user/jenkins-cli.jar -auth @/home/ec2-user/jenkins_auth -s http://${self.tags.Master_Private_IP}:8080 -auth @/home/ec2-user/jenkins_auth delete-node ${self.private_ip}"
+    ]
+    connection {
+      type        = "ssh"
+      user        = "ec2-user"
+      private_key = file("~/.ssh/id_rsa")
+      host        = self.public_ip
+    }
+  }
+
+  provisioner "local-exec" {
+    command = <<EOF
+aws --profile ${var.profile} ec2 wait instance-status-ok --region ${var.region-worker} --instance-ids ${self.id} \
+&& ansible-playbook --extra-vars 'passed_in_hosts=tag_Name_${self.tags.Name} master_ip=${self.tags.Master_Private_IP}' ansible_templates/install_worker.yaml
+EOF
+  }
+  tags = {
+    Name              = join("_", ["jenkins_worker_tf", count.index + 1])
+    Master_Private_IP = aws_instance.jenkins_main.private_ip
+  }
+  depends_on = [aws_main_route_table_association.worker_default_rt_assoc, aws_instance.jenkins_main]
 }
